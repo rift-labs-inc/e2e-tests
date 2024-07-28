@@ -1,3 +1,10 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from circuits.utils.btc_data import get_rift_btc_data
+from circuits.utils.proxy_wallet import wei_to_satoshi
+from circuits.utils.rift_lib import LiquidityProvider, build_giga_circuit_proof_and_input, compute_block_hash
+from circuits.utils.noir_lib import normalize_hex_str, run_command
 import asyncio
 import hashlib
 import json
@@ -8,25 +15,63 @@ from contextlib import asynccontextmanager
 
 from typing import Dict, Any, cast
 from aiocache import cached
-import sys
-import os
 import aiofiles
 from eth_typing import Address, ChecksumAddress, HexStr
 
 
 from pydantic import BaseModel
 from web3 import Web3, HTTPProvider
-from web3.types import Nonce, TxParams, TxReceipt, Wei
+from web3.types import Nonce, RPCEndpoint, TxParams, TxReceipt, Wei
 from anvil_web3 import AnvilWeb3, AnvilInstance
 from web3.contract.contract import Contract
 
 from utils import ContractArtifact, ReservationState, SwapReservation
+import functools
+import pickle
+import os
+from pathlib import Path
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from circuits.utils.noir_lib import normalize_hex_str, run_command
-from circuits.utils.rift_lib import LiquidityProvider, build_giga_circuit_proof_and_input
-from circuits.utils.proxy_wallet import wei_to_satoshi
-from circuits.utils.btc_data import get_rift_btc_data
+def persistent_async_cache(maxsize=128, cache_dir='./cache'):
+    def decorator(func):
+        # Create cache directory if it doesn't exist
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Generate filename based on the function name
+        filename = os.path.join(cache_dir, f"{func.__name__}_cache.pkl")
+        
+        # Load cache from file if it exists
+        if os.path.exists(filename):
+            with open(filename, 'rb') as f:
+                cache = pickle.load(f)
+        else:
+            cache = {}
+
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            key = str(args) + str(kwargs)
+            
+            if key in cache:
+                return cache[key]
+            
+            task = asyncio.create_task(func(*args, **kwargs))
+            result = await task
+            
+            cache[key] = result
+            
+            # Save cache to file
+            with open(filename, 'wb') as f:
+                pickle.dump(cache, f)
+            
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+
+ANVIL_DEBUG = True
+
 
 @asynccontextmanager
 async def change_dir_async(new_dir):
@@ -41,7 +86,11 @@ async def change_dir_async(new_dir):
 def testnet_autoexit(func):
     @wraps(func)
     async def wrapper(*args, **kwargs):
-        anvil = AnvilInstance(port="9000", supress_anvil_output=True)
+        anvil = AnvilInstance(
+            port="9000",
+            supress_anvil_output=not ANVIL_DEBUG,
+            steps_tracing=ANVIL_DEBUG
+        )
 
         kwargs["anvil"] = anvil
         try:
@@ -57,10 +106,11 @@ async def get_basefee_wei(w3: Web3) -> int:
     assert "baseFeePerGas" in latest_block, latest_block
     return latest_block['baseFeePerGas']
 
+
 def calculate_total_fees_wei(
     totalSwapAmount: int,
     basefee: int,
-    ):
+):
     """
     uint8 public protocolFeeBP = 100; // 100 bp = 1%
     uint256 public constant PROOF_GAS_COST = 420_000; // TODO: update to real value
@@ -81,12 +131,11 @@ def calculate_total_fees_wei(
     releaserReward = int(0.0002 * 10**18)
     MIN_ORDER_GAS_MULTIPLIER = 2
     protocolFee = (totalSwapAmount * (protocolFeeBP / 10_000))
-    proverFee = proverReward + ((PROOF_GAS_COST * basefee) * MIN_ORDER_GAS_MULTIPLIER)
-    releaserFee = releaserReward + ((RELEASE_GAS_COST * basefee) * MIN_ORDER_GAS_MULTIPLIER)
+    proverFee = proverReward + \
+        ((PROOF_GAS_COST * basefee) * MIN_ORDER_GAS_MULTIPLIER)
+    releaserFee = releaserReward + \
+        ((RELEASE_GAS_COST * basefee) * MIN_ORDER_GAS_MULTIPLIER)
     return int(protocolFee + proverFee + releaserFee)
-
-
-    
 
 
 async def fund_account_with_ether(private_key: str, w3: AnvilWeb3):
@@ -123,7 +172,11 @@ async def build_and_send_transaction(
             "value": Wei(value),
         }
     )
-    return await send_transaction(w3, transaction, private_key)
+    try:
+        return await send_transaction(w3, transaction, private_key)
+    except Exception as e:
+        print(json.dumps(await get_transaction_trace(e.args[0]["transactionHash"].hex(), w3)))
+        raise
 
 
 async def deposit_and_approve_weth(
@@ -229,12 +282,11 @@ async def deploy_rift_exchange(
         private_key=private_key,
         w3=w3,
     )
-    
+
 
 async def reserve_liquidity_rift(
     vault_indexes_to_reserve: list[int],
     amounts_to_reserve: list[int],
-    total_swap_amount: int,
     eth_payout_address: str,
     expired_swap_reservation_indexes: list[int],
     rift_exchange: Contract,
@@ -256,6 +308,56 @@ async def reserve_liquidity_rift(
         private_key,
     )
     return id
+"""
+function proposeTransactionProof(
+    bytes32 bitcoinTxId,
+    bytes32 confirmationBlockHash,
+    bytes32 proposedBlockHash,
+    bytes32 retargetBlockHash,
+    uint32 safeBlockHeight,
+    uint256 swapReservationIndex,
+    uint64 proposedBlockHeight,
+    bytes memory proof,
+    bytes32[16] memory aggregation_object
+"""
+
+
+async def propose_transaction_proof(
+    bitcoin_tx_id: str, # should be little endian (block explorer format) 
+    confirmation_block_hash: str,
+    proposed_block_hash: str,
+    retarget_block_hash: str,
+    safe_block_height: int,
+    swap_reservation_index: int,
+    proposed_block_height: int,
+    proof: bytes,
+    aggregation_object: list[str],
+    rift_exchange: Contract,
+    private_key: str,
+    w3: Web3,
+):
+    account = w3.eth.account.from_key(private_key).address
+    await build_and_send_transaction(
+        w3,
+        account,
+        rift_exchange.functions.proposeTransactionProof(
+            bitcoinTxId=bytes.fromhex(normalize_hex_str(bitcoin_tx_id))[::-1],
+            confirmationBlockHash=bytes.fromhex(
+                normalize_hex_str(confirmation_block_hash)),
+            proposedBlockHash=bytes.fromhex(
+                normalize_hex_str(proposed_block_hash)),
+            retargetBlockHash=bytes.fromhex(
+                normalize_hex_str(retarget_block_hash)),
+            safeBlockHeight=safe_block_height,
+            swapReservationIndex=swap_reservation_index,
+            proposedBlockHeight=proposed_block_height,
+            proof=proof,
+            aggregation_object=list(map(lambda input: bytes.fromhex(
+                normalize_hex_str(input)), aggregation_object))
+        ),
+        private_key=private_key
+    )
+
 
 async def deposit_liquidity_rift(
     btc_payout_locking_script: str,
@@ -272,7 +374,8 @@ async def deposit_liquidity_rift(
         w3,
         account,
         rift_exchange.functions.depositLiquidity(
-            btcPayoutLockingScript=bytes.fromhex(normalize_hex_str(btc_payout_locking_script)),
+            btcPayoutLockingScript=bytes.fromhex(
+                normalize_hex_str(btc_payout_locking_script)),
             exchangeRate=btc_exchange_rate,
             vaultIndexToOverwrite=vault_index_to_overwrite,
             depositAmount=deposit_amount,
@@ -282,9 +385,9 @@ async def deposit_liquidity_rift(
     )
 
 
-
 async def get_deposit_vaults_length(rift_exchange: Contract):
     return await asyncio.to_thread(rift_exchange.functions.getDepositVaultsLength().call)
+
 
 async def get_reservation_vaults_length(rift_exchange: Contract):
     return await asyncio.to_thread(rift_exchange.functions.getReservationLength().call)
@@ -305,6 +408,24 @@ async def get_reservation(reservation_index: int, rift_exchange: Contract) -> Sw
         vault_indexes=raw_data[9],
         amounts_to_reserve=raw_data[10]
     )
+
+
+async def get_transaction_trace(transaction_hash: str, w3: Web3):
+    trace = await asyncio.to_thread(
+        w3.provider.make_request,
+        RPCEndpoint("debug_traceTransaction"),
+        [normalize_hex_str(transaction_hash), {
+            "disableStorage": True, "disableMemory": True, "disableStack": False}]
+    )
+
+    if 'error' in trace or 'result' not in trace:
+        if 'error' in trace:
+            raise Exception(f"Error retrieving trace: {trace['error']}")
+        else:
+            raise Exception(f"Invalid response received: {trace}")
+
+    async with aiofiles.open("debug_file.json", "w") as file:
+        await file.write(json.dumps(trace["result"], indent=2))
 
 
 @testnet_autoexit
@@ -342,7 +463,7 @@ async def main(anvil: AnvilInstance | None = None):
     ]
     # BTC/ETH is 1000
     # amount of ETH being deposited is 0.0001
-    # thus the amount of BTC expected is 
+    # thus the amount of BTC expected is
 
     await fund_account_with_ether(private_key, w3)
     weth = await deploy_weth(private_key, w3)
@@ -375,9 +496,6 @@ async def main(anvil: AnvilInstance | None = None):
             w3=w3,
         )
 
-
-    
-
     utilized_lps = [
         LiquidityProvider(
             amount=w3.to_wei(0.0001, "ether"),
@@ -407,21 +525,23 @@ async def main(anvil: AnvilInstance | None = None):
     total_swap_amount = initial_total_swap_amount + fees
 
     # necesary to account for rounding errors as a result of integer only math
-    true_payout = sum(wei_to_satoshi(lp.amount, lp.btc_exchange_rate) * lp.btc_exchange_rate for lp in utilized_lps)
+    true_payout = sum(wei_to_satoshi(lp.amount, lp.btc_exchange_rate)
+                      * lp.btc_exchange_rate for lp in utilized_lps)
 
-    print("Fees as percentage of total swap amount", round((fees / (initial_total_swap_amount + fees))*100, 2))
+    print("Fees as percentage of total swap amount", round(
+        (fees / (initial_total_swap_amount + fees))*100, 2))
     print("Total USD Swap Amount", round((total_swap_amount/(10**18))*3400, 2))
     print("Total ETH Swap Amount", total_swap_amount / 10**18, "ether")
-    print("Total BTC Being Sent", wei_to_satoshi(sum(map(lambda lp: lp.amount, utilized_lps)), wei_sats_rate), "sats")
+    print("Total BTC Being Sent", wei_to_satoshi(
+        sum(map(lambda lp: lp.amount, utilized_lps)), wei_sats_rate), "sats")
     print("Total ETH Being Swapped", initial_total_swap_amount / 10**18, "ether")
-    
+
     # something constant in the future so the order nonce is constant
     w3.anvil.set_next_block_timestamp(2524640461)
 
     reservation_id = await reserve_liquidity_rift(
         vault_indexes_to_reserve=[0, 1, 2],
         amounts_to_reserve=list(map(lambda lp: lp.amount, utilized_lps)),
-        total_swap_amount=true_payout,
         eth_payout_address=address,
         expired_swap_reservation_indexes=[],
         rift_exchange=rift_exchange,
@@ -431,7 +551,7 @@ async def main(anvil: AnvilInstance | None = None):
 
     order_nonce = (await get_reservation(reservation_id, rift_exchange)).nonce
     print("Order nonce", order_nonce)
-    #print("LPS", utilized_lps)
+    # print("LPS", utilized_lps)
 
     rift_bitcoin_data = await get_rift_btc_data(
         proposed_block_height=proposed_height,
@@ -440,31 +560,49 @@ async def main(anvil: AnvilInstance | None = None):
         mainnet=True
     )
 
-
     async with change_dir_async('circuits'):
-        giga_proof_artifact = await build_giga_circuit_proof_and_input(
-            txn_data_no_segwit_hex=rift_bitcoin_data.txn_data_no_segwit_hex,
-            lp_reservations=utilized_lps,
-            proposed_block_header=rift_bitcoin_data.proposed_block_header,
-            safe_block_header=rift_bitcoin_data.safe_block_header,
-            retarget_block_header=rift_bitcoin_data.retarget_block_header,
-            inner_block_headers=rift_bitcoin_data.inner_block_headers,
-            confirmation_block_headers=rift_bitcoin_data.confirmation_block_headers,
-            order_nonce_hex=order_nonce,
-            expected_payout=true_payout,
-            safe_block_height=safe_height,
-            block_height_delta=rift_bitcoin_data.block_height_delta
-        )
+        @persistent_async_cache()
+        async def get_artifact_5():
+            giga_proof_artifact = await build_giga_circuit_proof_and_input(
+                txn_data_no_segwit_hex=rift_bitcoin_data.txn_data_no_segwit_hex,
+                lp_reservations=utilized_lps,
+                proposed_block_header=rift_bitcoin_data.proposed_block_header,
+                safe_block_header=rift_bitcoin_data.safe_block_header,
+                retarget_block_header=rift_bitcoin_data.retarget_block_header,
+                inner_block_headers=rift_bitcoin_data.inner_block_headers,
+                confirmation_block_headers=rift_bitcoin_data.confirmation_block_headers,
+                order_nonce_hex=order_nonce,
+                expected_payout=true_payout,
+                safe_block_height=safe_height,
+                block_height_delta=rift_bitcoin_data.block_height_delta,
+                verify=True 
+            )
+            return giga_proof_artifact
+        giga_proof_artifact = await get_artifact_5()
+    print("Giga proof", giga_proof_artifact)
 
-    print("Giga Proof Artifact", giga_proof_artifact)
-    
+    print("Giga Proof Generated...")
+    print("FULL PUB INPUTS FORMATTED")
+    for input in giga_proof_artifact.full_public_inputs:
+        print(input)
 
-        
-
-
-
-    
-
+    await propose_transaction_proof(
+        bitcoin_tx_id=swap_txid,
+        confirmation_block_hash=compute_block_hash(
+            rift_bitcoin_data.confirmation_block_headers[-1]),
+        proposed_block_hash=compute_block_hash(
+            rift_bitcoin_data.proposed_block_header),
+        retarget_block_hash=compute_block_hash(
+            rift_bitcoin_data.retarget_block_header),
+        safe_block_height=safe_height,
+        swap_reservation_index=reservation_id,
+        proposed_block_height=proposed_height,
+        proof=bytes.fromhex(normalize_hex_str(giga_proof_artifact.proof)),
+        aggregation_object=giga_proof_artifact.aggregation_object,
+        rift_exchange=rift_exchange,
+        private_key=private_key,
+        w3=w3
+    )
 
 
 if __name__ == "__main__":
