@@ -2,7 +2,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from circuits.utils.btc_data import get_rift_btc_data
-from circuits.utils.proxy_wallet import wei_to_satoshi
+from circuits.utils.proxy_wallet import sats_to_wei, wei_to_satoshi
 from circuits.utils.rift_lib import LiquidityProvider, build_giga_circuit_proof_and_input, compute_block_hash
 from circuits.utils.noir_lib import normalize_hex_str, run_command
 import asyncio
@@ -70,7 +70,7 @@ def persistent_async_cache(maxsize=128, cache_dir='./cache'):
 
 
 
-ANVIL_DEBUG = True
+ANVIL_DEBUG = False
 
 
 @asynccontextmanager
@@ -337,7 +337,7 @@ async def propose_transaction_proof(
     w3: Web3,
 ):
     account = w3.eth.account.from_key(private_key).address
-    await build_and_send_transaction(
+    return await build_and_send_transaction(
         w3,
         account,
         rift_exchange.functions.proposeTransactionProof(
@@ -370,7 +370,7 @@ async def deposit_liquidity_rift(
     w3: Web3,
 ):
     account = w3.eth.account.from_key(private_key).address
-    await build_and_send_transaction(
+    return await build_and_send_transaction(
         w3,
         account,
         rift_exchange.functions.depositLiquidity(
@@ -432,10 +432,10 @@ async def get_transaction_trace(transaction_hash: str, w3: Web3):
 async def main(anvil: AnvilInstance | None = None):
     assert isinstance(anvil, AnvilInstance)
     private_key = hashlib.sha256(b"rift-test").hexdigest()
-    swap_txid = "8df99d697780166f12df68b1e2410a909374b6414da57a1a65f3b84eb8a4dd0f"
-    proposed_height = 854136
-    safe_height = 854133
-    safe_hash = "000000000000000000022e9a6fdb38378989170359d2afbb47bee7e251daf9fd"
+    swap_txid = "fb7ea6c1a58f9e827c50aefb3117ce41dd5fecb969041864ec0eff9273b08038"
+    proposed_height = 854374
+    safe_height = 854370
+    safe_hash = "000000000000000000023bb593ca6c8abab889bd265a303dbbe56c1fbc0660b1"
     w3: AnvilWeb3 = AnvilWeb3(HTTPProvider(anvil.http_url))
     address = w3.eth.account.from_key(private_key).address
 
@@ -496,19 +496,22 @@ async def main(anvil: AnvilInstance | None = None):
             w3=w3,
         )
 
+    def noir_int_normalize(wei: int, wei_sats_rate: int):
+        return sats_to_wei(wei_to_satoshi(wei, wei_sats_rate), wei_sats_rate)
+
     utilized_lps = [
         LiquidityProvider(
-            amount=w3.to_wei(0.0001, "ether"),
+            amount=noir_int_normalize(w3.to_wei(0.0001, "ether"), wei_sats_rate),
             btc_exchange_rate=wei_sats_rate,
             locking_script_hex="001463dff5f8da08ca226ba01f59722c62ad9b9b3eaa",
         ),
         LiquidityProvider(
-            amount=w3.to_wei(0.0001, "ether"),
+            amount=noir_int_normalize(w3.to_wei(0.0001, "ether"), wei_sats_rate),
             btc_exchange_rate=wei_sats_rate,
             locking_script_hex="0014aa86191235be8883693452cf30daf854035b085b",
         ),
         LiquidityProvider(
-            amount=w3.to_wei(0.0001, "ether"),
+            amount=noir_int_normalize(w3.to_wei(0.0001, "ether"), wei_sats_rate),
             btc_exchange_rate=wei_sats_rate,
             locking_script_hex="00146ab8f6c80b8a7dc1b90f7deb80e9b59ae16b7a5a",
         ),
@@ -551,18 +554,24 @@ async def main(anvil: AnvilInstance | None = None):
 
     order_nonce = (await get_reservation(reservation_id, rift_exchange)).nonce
     print("Order nonce", order_nonce)
-    # print("LPS", utilized_lps)
+    #print("LPS", utilized_lps)
+    #return
 
-    rift_bitcoin_data = await get_rift_btc_data(
-        proposed_block_height=proposed_height,
-        safe_block_height=safe_height,
-        txid=swap_txid,
-        mainnet=True
-    )
+    @persistent_async_cache()
+    async def get_btc_data_1():
+        rift_bitcoin_data = await get_rift_btc_data(
+            proposed_block_height=proposed_height,
+            safe_block_height=safe_height,
+            txid=swap_txid,
+            mainnet=True
+        )
+        return rift_bitcoin_data
+    print("Downloading block data...")
+    rift_bitcoin_data = await get_btc_data_1()
 
     async with change_dir_async('circuits'):
         @persistent_async_cache()
-        async def get_artifact_5():
+        async def get_artifact_6():
             giga_proof_artifact = await build_giga_circuit_proof_and_input(
                 txn_data_no_segwit_hex=rift_bitcoin_data.txn_data_no_segwit_hex,
                 lp_reservations=utilized_lps,
@@ -578,15 +587,11 @@ async def main(anvil: AnvilInstance | None = None):
                 verify=True 
             )
             return giga_proof_artifact
-        giga_proof_artifact = await get_artifact_5()
-    print("Giga proof", giga_proof_artifact)
+        giga_proof_artifact = await get_artifact_6()
 
-    print("Giga Proof Generated...")
-    print("FULL PUB INPUTS FORMATTED")
-    for input in giga_proof_artifact.full_public_inputs:
-        print(input)
+    print("All Proofs Generated!")
 
-    await propose_transaction_proof(
+    receipt = await propose_transaction_proof(
         bitcoin_tx_id=swap_txid,
         confirmation_block_hash=compute_block_hash(
             rift_bitcoin_data.confirmation_block_headers[-1]),
@@ -603,6 +608,7 @@ async def main(anvil: AnvilInstance | None = None):
         private_key=private_key,
         w3=w3
     )
+    print("Giga Proof proposed (and verified) in contract successfully for", receipt['gasUsed'], "gas") 
 
 
 if __name__ == "__main__":
