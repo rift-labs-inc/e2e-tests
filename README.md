@@ -1,6 +1,7 @@
 # E2E Tests 
 
 ## Dependencies
+
 Foundry and Python3.10+ must be installed
 ```
 python -m pip install -r circuits/requirements.txt
