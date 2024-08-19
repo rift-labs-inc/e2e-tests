@@ -4,7 +4,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from circuits.utils.btc_data import get_rift_btc_data
 from circuits.utils.proxy_wallet import sats_to_wei, wei_to_satoshi
 from circuits.utils.rift_lib import LiquidityProvider, build_giga_circuit_proof_and_input, compute_block_hash
-from circuits.utils.noir_lib import normalize_hex_str, run_command
+from circuits.utils.noir_lib import ensure_cache_is_current, normalize_hex_str, run_command
 import asyncio
 import hashlib
 import json
@@ -70,7 +70,7 @@ def persistent_async_cache(maxsize=128, cache_dir='./cache'):
 
 
 
-ANVIL_DEBUG = False
+ANVIL_DEBUG = False 
 
 
 @asynccontextmanager
@@ -278,6 +278,10 @@ async def deploy_rift_exchange(
             "initialBlockHash": initial_block_hash,
             "verifierContractAddress": verifier_contract_address,
             "depositTokenAddress": deposit_token_address,
+            "_proverReward": 0,
+            "_releaserReward": 0,
+            "_protocolAddress": w3.eth.account.from_key(private_key).address,
+            "_owner": w3.eth.account.from_key(private_key).address,
         },
         private_key=private_key,
         w3=w3,
@@ -317,8 +321,9 @@ function proposeTransactionProof(
     uint32 safeBlockHeight,
     uint256 swapReservationIndex,
     uint64 proposedBlockHeight,
-    bytes memory proof,
-    bytes32[16] memory aggregation_object
+    uint64 confirmationBlockHeight,
+    bytes32[16] memory aggregation_object,
+    bytes memory proof
 """
 
 
@@ -330,6 +335,7 @@ async def propose_transaction_proof(
     safe_block_height: int,
     swap_reservation_index: int,
     proposed_block_height: int,
+    confirmation_block_height: int, 
     proof: bytes,
     aggregation_object: list[str],
     rift_exchange: Contract,
@@ -351,6 +357,7 @@ async def propose_transaction_proof(
             safeBlockHeight=safe_block_height,
             swapReservationIndex=swap_reservation_index,
             proposedBlockHeight=proposed_block_height,
+            confirmationBlockHeight=confirmation_block_height,
             proof=proof,
             aggregation_object=list(map(lambda input: bytes.fromhex(
                 normalize_hex_str(input)), aggregation_object))
@@ -572,19 +579,25 @@ async def main(anvil: AnvilInstance | None = None):
     async with change_dir_async('circuits'):
         @persistent_async_cache()
         async def get_artifact_6():
+            assert rift_bitcoin_data.txn_data_no_segwit_hex is not None
+            blocks = [
+                rift_bitcoin_data.safe_block_header,
+                *rift_bitcoin_data.inner_block_headers,
+                rift_bitcoin_data.proposed_block_header,
+                *rift_bitcoin_data.confirmation_block_headers
+            ]
+
+            await ensure_cache_is_current()
             giga_proof_artifact = await build_giga_circuit_proof_and_input(
                 txn_data_no_segwit_hex=rift_bitcoin_data.txn_data_no_segwit_hex,
                 lp_reservations=utilized_lps,
-                proposed_block_header=rift_bitcoin_data.proposed_block_header,
-                safe_block_header=rift_bitcoin_data.safe_block_header,
                 retarget_block_header=rift_bitcoin_data.retarget_block_header,
-                inner_block_headers=rift_bitcoin_data.inner_block_headers,
-                confirmation_block_headers=rift_bitcoin_data.confirmation_block_headers,
+                blocks=blocks,
+                safe_block_height=rift_bitcoin_data.safe_block_header.height,
+                safe_block_height_delta=rift_bitcoin_data.block_height_delta,
                 order_nonce_hex=order_nonce,
                 expected_payout=true_payout,
-                safe_block_height=safe_height,
-                block_height_delta=rift_bitcoin_data.block_height_delta,
-                verify=True 
+                verify=True,
             )
             return giga_proof_artifact
         giga_proof_artifact = await get_artifact_6()
@@ -600,6 +613,7 @@ async def main(anvil: AnvilInstance | None = None):
         retarget_block_hash=compute_block_hash(
             rift_bitcoin_data.retarget_block_header),
         safe_block_height=safe_height,
+        confirmation_block_height=rift_bitcoin_data.confirmation_block_headers[-1].height,
         swap_reservation_index=reservation_id,
         proposed_block_height=proposed_height,
         proof=bytes.fromhex(normalize_hex_str(giga_proof_artifact.proof)),
