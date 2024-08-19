@@ -11,8 +11,5 @@ python -m pip install -r requirements.txt
 
 ## Run tests
 ```
-python -m pytest circuits/tests
+python src/main.py 
 ```
-
-## Local Explorer 
-docker run --rm -p 5100:80 --name otterscan -d --env ERIGON_URL="127.0.0.1:9000" otterscan/otterscan:latest
