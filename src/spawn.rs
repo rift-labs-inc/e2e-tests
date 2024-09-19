@@ -4,8 +4,8 @@ use alloy::node_bindings::Anvil;
 use alloy::sol;
 
 sol!(
-
-    );
+    
+);
 
 pub async fn spawn_bitcoin_regtest() -> Result<bitcoind::BitcoinD> {
     tokio::task::spawn_blocking(|| {
