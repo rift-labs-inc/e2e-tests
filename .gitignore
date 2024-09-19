@@ -5,3 +5,8 @@ debug_file.json
 
 # Rust
 *target/
+
+
+# Added by cargo
+
+/target
