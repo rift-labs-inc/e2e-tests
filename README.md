@@ -12,4 +12,5 @@ RUST_LOG=main=debug,hypernode=debug,test_utils=debug cargo run --release --bin d
 
 ## Run E2E Tests
 ```bash
-``RUST_LOG=main=debug,hypernode=debug,test_utils=debug cargo test --release --test main -- --show-output`
+RUST_LOG=main=debug,hypernode=debug,test_utils=debug cargo test --release --test main -- --show-output
+```
