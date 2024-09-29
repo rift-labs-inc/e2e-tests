@@ -6,7 +6,7 @@ use tokio::signal;
 async fn main() -> Result<()> {
     env_logger::init();
     let devnet = RiftDevnet::setup().await?;
-    devnet.run_hypernode().await?;
+    devnet.spawn_hypernode().await?;
     signal::ctrl_c().await?;
     drop(devnet);
     Ok(())
