@@ -36,7 +36,8 @@ mod integration_tests {
 
     async fn setup() -> Result<RiftDevnet> {
         let _ = env_logger::init();
-        RiftDevnet::setup().await
+        let mock_proofs = true;
+        RiftDevnet::setup(mock_proofs).await
     }
 
     async fn teardown(devnet: RiftDevnet) {

@@ -2,7 +2,7 @@ use crate::constants::MINIMUM_CONFIRMATION_DELTA;
 use chrono;
 use log::info;
 use rift_core::btc_light_client::AsLittleEndianBytes;
-use crate::sp1_core::{SP1_CIRCUIT_VERIFICATION_HASH, SP1_VERIFIER_BYTECODE};
+use crate::sp1_core::{SP1_CIRCUIT_VERIFICATION_HASH, SP1_MOCK_VERIFIER_BYTECODE, SP1_VERIFIER_BYTECODE};
 use alloy::{hex::FromHex, pubsub::PubSubFrontend};
 use alloy::primitives::U256;
 use alloy::providers::ext::AnvilApi;
@@ -60,6 +60,7 @@ pub struct RiftDevnet {
     pub miner: bitcoin::Address<NetworkChecked>,
     pub usdt_contract: Arc<MockUSDTWebsocket>,
     pub rift_exchange_contract: Arc<hypernode::core::RiftExchangeWebsocket>,
+    pub mock_proof: bool,
     evm_ws_rpc: String,
     btc_rpc: String,
     hypernode_signer: PrivateKeySigner
@@ -74,7 +75,7 @@ impl RiftDevnet {
         let btc_rpc_concurrency = 1;
         let btc_polling_interval = 1;
         let proof_gen_concurrency = 1;
-        let mock_proof = false;
+        let mock_proof = self.mock_proof;
         let flashbots = false;
         let flashbots_relay_rpc: Option<String> = None;
         let private_key = self.hypernode_signer.clone().into_credential().to_bytes().to_lower_hex_string();
@@ -108,7 +109,7 @@ impl RiftDevnet {
         Ok(())
     }
 
-    pub async fn setup() -> Result<Self> {
+    pub async fn setup(mock_proof: bool) -> Result<Self> {
         let network = bitcoin::Network::Regtest;
         let (bitcoin_regtest, anvil) = tokio::try_join!(spawn_bitcoin_regtest(), spawn_anvil())?;
 
@@ -148,7 +149,7 @@ impl RiftDevnet {
 
         // now setup contracts
         let (rift_exchange, usdt_contract) =
-            deploy_contracts(&anvil, &bitcoin_regtest.client).await?;
+            deploy_contracts(&anvil, &bitcoin_regtest.client, mock_proof).await?;
 
         let provider = rift_exchange.provider().clone();
 
@@ -164,6 +165,7 @@ impl RiftDevnet {
 
         
         Ok(RiftDevnet {
+            mock_proof,
             bitcoin_regtest_instance: bitcoin_regtest,
             anvil_instance: anvil,
             miner,
@@ -215,6 +217,7 @@ sol!(
 async fn deploy_contracts(
     anvil: &AnvilInstance,
     bitcoind_client: &Client,
+    mock_proof: bool,
 ) -> Result<(Arc<RiftExchangeWebsocket>, Arc<MockUSDTWebsocket>)> {
     let signer: PrivateKeySigner = anvil.keys()[0].clone().into();
     info!("Exchange owner address: {}", signer.address());
@@ -232,7 +235,10 @@ async fn deploy_contracts(
     provider
         .anvil_set_code(
             verifier_contract,
-            Vec::from_hex(SP1_VERIFIER_BYTECODE)?.into(),
+            match mock_proof {
+                true => Vec::from_hex(SP1_MOCK_VERIFIER_BYTECODE)?.into(),
+                false => Vec::from_hex(SP1_VERIFIER_BYTECODE)?.into(),
+            },
         )
         .await?;
     let usdt_contract = MockUSDT::deploy(provider.clone()).await?;
@@ -246,7 +252,6 @@ async fn deploy_contracts(
     let retarget_block_height = initial_checkpoint_height - (initial_checkpoint_height % 2016);
     let initial_retarget_block_hash = bitcoind_client.get_block_hash(retarget_block_height)?;
     info!("USDT address: {}", usdt_contract.address());
-
 
     let contract = RiftExchange::deploy(
         provider.clone(),
