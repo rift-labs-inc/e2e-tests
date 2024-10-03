@@ -4,7 +4,7 @@ use log::info;
 use rift_core::btc_light_client::AsLittleEndianBytes;
 use crate::sp1_core::{SP1_CIRCUIT_VERIFICATION_HASH, SP1_MOCK_VERIFIER_BYTECODE, SP1_VERIFIER_BYTECODE};
 use alloy::{hex::FromHex, pubsub::PubSubFrontend};
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::sol;
 use bitcoin::hex::DisplayHex;
@@ -140,6 +140,9 @@ impl RiftDevnet {
 
         let funded_btc_wallet = P2WPKHBitcoinWallet::from_secret_key(private_key, network);
 
+        let hypernode_signer: PrivateKeySigner = anvil.keys()[1].clone().into();
+        let hypernode_address = hypernode_signer.address();
+
         // Generate blocks to the miner's address
         bitcoin_regtest
             .client
@@ -149,14 +152,12 @@ impl RiftDevnet {
 
         // now setup contracts
         let (rift_exchange, usdt_contract) =
-            deploy_contracts(&anvil, &bitcoin_regtest.client, mock_proof).await?;
+            deploy_contracts(&anvil, &bitcoin_regtest.client, hypernode_address, mock_proof).await?;
 
         let provider = rift_exchange.provider().clone();
 
         let evm_ws_rpc: String = anvil.ws_endpoint();
 
-        let hypernode_signer: PrivateKeySigner = anvil.keys()[1].clone().into();
-        let hypernode_address = hypernode_signer.address();
 
         // give some eth using anvil
         provider
@@ -217,6 +218,7 @@ sol!(
 async fn deploy_contracts(
     anvil: &AnvilInstance,
     bitcoind_client: &Client,
+    hypernode_address: Address,
     mock_proof: bool,
 ) -> Result<(Arc<RiftExchangeWebsocket>, Arc<MockUSDTWebsocket>)> {
     let signer: PrivateKeySigner = anvil.keys()[0].clone().into();
@@ -264,7 +266,7 @@ async fn deploy_contracts(
         signer.address(),
         signer.address(),
         SP1_CIRCUIT_VERIFICATION_HASH.into(),
-        MINIMUM_CONFIRMATION_DELTA,
+        [hypernode_address].to_vec()
     )
     .await?;
 
