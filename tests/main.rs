@@ -1,26 +1,17 @@
 #[cfg(test)]
 mod integration_tests {
 
-    use alloy::network::eip2718::Encodable2718;
+    use alloy::eips::BlockId;
+    use alloy::primitives::U256;
+    use alloy::providers::Provider;
     use alloy::providers::WalletProvider;
-    use alloy::{
-        eips::{BlockId, BlockNumberOrTag},
-        network::TransactionBuilder,
-        primitives::{Bytes, U256},
-        providers::Provider,
-        rpc::types::{BlockTransactionsKind, Filter, TransactionInput, TransactionRequest},
-        sol_types::{SolEvent, SolValue},
-    };
-    use core::time;
-    use eyre::{Result, WrapErr};
-    use futures::stream::{self, TryStreamExt};
+    use alloy::rpc::types::BlockTransactionsKind;
+    use eyre::Result;
     use futures_util::StreamExt;
+    use hypernode::constants::CHALLENGE_PERIOD_MINUTES;
     use log::info;
-    use std::error::Error;
-    use std::time::{Instant, UNIX_EPOCH};
-    use std::{collections::HashMap, collections::HashSet, sync::Arc};
-    use tokio::time::Duration;
-    use tokio::{sync::Mutex, time::sleep};
+    use std::{collections::HashSet, sync::Arc};
+    use tokio::sync::Mutex;
 
     use bitcoind::bitcoincore_rpc::{RawTx, RpcApi};
     use futures::future::{try_join_all, TryFutureExt};
@@ -219,7 +210,11 @@ mod integration_tests {
             allocated_btc_fees,
         );
 
-        devnet.rift_exchange_contract.provider().anvil_set_interval_mining(5).await?;
+        devnet
+            .rift_exchange_contract
+            .provider()
+            .anvil_set_interval_mining(5)
+            .await?;
 
         devnet
             .bitcoin_regtest_instance
@@ -232,7 +227,6 @@ mod integration_tests {
             .bitcoin_regtest_instance
             .client
             .generate_to_address(2, &devnet.miner)?;
-
 
         // Now setup an event listener that waits for ProofSubmitted event => mine a block 10
         // minutes into the future
@@ -257,7 +251,6 @@ mod integration_tests {
         let processed_logs = Arc::new(Mutex::new(HashSet::new()));
 
         loop {
-            let contract = Arc::clone(&devnet.rift_exchange_contract);
             tokio::select! {
                 Some(log) = swap_complete_stream.next() => {
                     let log_data = log.clone()?;
@@ -282,8 +275,13 @@ mod integration_tests {
                         processed_logs_guard.insert(log_identifier);
                         drop(processed_logs_guard);
                         info!("ProofSubmitted w/ reservation index: {:?}", &log_data.0.swapReservationIndex);
-                        let swap_reservation_index = log_data.0.swapReservationIndex;
-                        break;
+                        let _swap_reservation_index = log_data.0.swapReservationIndex;
+                        // mine an anvil block 10 minutes into the future
+                        let current_block = devnet.rift_exchange_contract.provider().get_block(BlockId::latest(), BlockTransactionsKind::Hashes).await?.unwrap();
+                        let current_timestamp = current_block.header.timestamp;
+                        let future_timestamp = current_timestamp + (CHALLENGE_PERIOD_MINUTES * 60) + 1;
+                        devnet.rift_exchange_contract.provider().anvil_set_next_block_timestamp(future_timestamp).await?;
+                        devnet.rift_exchange_contract.provider().anvil_mine(Some(U256::from(1)), None).await?;
                     }
                 }
             };
