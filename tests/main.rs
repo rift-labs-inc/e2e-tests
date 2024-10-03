@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod integration_tests {
-
     use alloy::eips::BlockId;
     use alloy::primitives::U256;
     use alloy::providers::Provider;
@@ -263,6 +262,7 @@ mod integration_tests {
 
                         let swap_reservation_index = log_data.0.swapReservationIndex;
                         info!("SwapComplete with reservation index: {:?}", &swap_reservation_index);
+                        break;
                     }
                 }
 
