@@ -1,4 +1,6 @@
 # E2E Tests 
+**DEPRECATED, all protocol code now located [here](https://github.com/rift-labs-inc/protocol)** <br> <br>
+
 ## Prerequisites
 - [Rust](https://www.rust-lang.org/tools/install)
 - [Docker](https://docs.docker.com/get-docker/)
